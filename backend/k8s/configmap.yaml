@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inventory-config
+  namespace: inventory-system
+data:
+  DB_HOST: "inventory-db"
+  DB_PORT: "5432"
+  DB_NAME: "inventory"
+  APP_ENV: "production"

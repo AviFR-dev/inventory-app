@@ -1,0 +1,74 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-backend
+  namespace: inventory-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inventory-backend
+  template:
+    metadata:
+      labels:
+        app: inventory-backend
+    spec:
+      containers:
+      - name: inventory-backend
+        image: avifrdev/inventory-app:latest
+        ports:
+        - containerPort: 5000
+        envFrom:
+        - configMapRef:
+            name: inventory-config
+        - secretRef:
+            name: inventory-secret
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-db
+  namespace: inventory-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory-db
+  template:
+    metadata:
+      labels:
+        app: inventory-db
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: inventory-config
+              key: DB_NAME
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: inventory-secret
+              key: DB_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: inventory-secret
+              key: DB_PASSWORD
