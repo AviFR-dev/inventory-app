@@ -8,19 +8,19 @@ pipeline {
 
     stages {
 
-        stage('Build') {
-            steps {
-                echo 'Installing dependencies...'
-                sh 'pip install -r backend/requirements.txt --user'
-            }
-        }
+stage('Build') {
+    steps {
+        echo 'Installing dependencies...'
+        sh 'python3 -m pip install -r backend/requirements.txt --break-system-packages'
+    }
+}
 
-        stage('Test') {
-            steps {
-                echo 'Running tests...'
-                sh 'cd backend && python -m pytest tests/ -v'
-            }
-        }
+stage('Test') {
+    steps {
+        echo 'Running tests...'
+        sh 'cd backend && python3 -m pytest tests/ -v'
+    }
+}
 
         stage('Docker Build') {
             steps {
