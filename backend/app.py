@@ -1,9 +1,10 @@
-from flask import Flask, render_template, request, redirect, url_for, jsonify
+﻿from flask import Flask, render_template, request, redirect, url_for, jsonify
 from models import db, Product
 import os
 
 def create_app(test_config=None):
-    app = Flask(__name__, template_folder='../frontend/templates')
+    app = Flask(__name__)
+    app.template_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend', 'templates')
 
     if test_config:
         app.config.update(test_config)
@@ -38,26 +39,17 @@ def create_app(test_config=None):
             data = request.get_json()
         else:
             data = request.form
-
-        name        = data.get('name', '').strip()
+        name = data.get('name', '').strip()
         description = data.get('description', '').strip()
-        quantity    = data.get('quantity', 0)
-        price       = data.get('price', 0.0)
-
+        quantity = data.get('quantity', 0)
+        price = data.get('price', 0.0)
         if not name:
             if request.is_json:
                 return jsonify({'error': 'Name is required'}), 400
             return redirect(url_for('index'))
-
-        product = Product(
-            name=name,
-            description=description,
-            quantity=int(quantity),
-            price=float(price)
-        )
+        product = Product(name=name, description=description, quantity=int(quantity), price=float(price))
         db.session.add(product)
         db.session.commit()
-
         if request.is_json:
             return jsonify(product.to_dict()), 201
         return redirect(url_for('index'))
@@ -66,10 +58,10 @@ def create_app(test_config=None):
     def update_product(product_id):
         product = Product.query.get_or_404(product_id)
         data = request.get_json()
-        product.name        = data.get('name', product.name)
+        product.name = data.get('name', product.name)
         product.description = data.get('description', product.description)
-        product.quantity    = data.get('quantity', product.quantity)
-        product.price       = data.get('price', product.price)
+        product.quantity = data.get('quantity', product.quantity)
+        product.price = data.get('price', product.price)
         db.session.commit()
         return jsonify(product.to_dict()), 200
 
@@ -86,6 +78,7 @@ def create_app(test_config=None):
 
     return app
 
-
 if __name__ == '__main__':
     app = create_app()
+    debug_mode = os.environ.get('APP_ENV', 'production') == 'development'
+    app.run(host='0.0.0.0', port=5000, debug=debug_mode)
