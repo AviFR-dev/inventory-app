@@ -11,7 +11,7 @@ pipeline {
 stage('Build') {
     steps {
         echo 'Installing dependencies...'
-        sh 'python3 -m pip install -r backend/requirements.txt --break-system-packages'
+        sh 'python3 -m pip install -r backend/requirements.txt pytest --break-system-packages'
     }
 }
 
