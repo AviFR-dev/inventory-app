@@ -59,7 +59,22 @@ stage('Test') {
             }
         }
     }
-
+stage('Update Helm Values') {
+    steps {
+        echo 'Updating Helm values with new image tag...'
+        sh """
+            git clone https://github.com/AviFR-dev/inventory-k8s.git
+            cd inventory-k8s
+            git checkout dev
+            sed -i 's/tag: .*/tag: "${DOCKER_TAG}"/' helm/values.yaml
+            git config user.email "jenkins@inventory.com"
+            git config user.name "Jenkins"
+            git add helm/values.yaml
+            git commit -m "Auto-deploy: update image tag to ${DOCKER_TAG}"
+            git push https://github.com/AviFR-dev/inventory-k8s.git dev
+        """
+    }
+}
     post {
         success {
             echo '✅ Pipeline completed successfully!'
