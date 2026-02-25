@@ -1,0 +1,96 @@
+{
+  "family": "inventory-task",
+  "networkMode": "bridge",
+  "containerDefinitions": [
+    {
+      "name": "inventory-db",
+      "image": "postgres:15-alpine",
+      "memory": 256,
+      "cpu": 128,
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5432,
+          "hostPort": 5432,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "POSTGRES_DB",
+          "value": "inventory"
+        },
+        {
+          "name": "POSTGRES_USER",
+          "value": "postgres"
+        },
+        {
+          "name": "POSTGRES_PASSWORD",
+          "value": "postgres"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/inventory-task",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    },
+    {
+      "name": "inventory-backend",
+      "image": "830518265652.dkr.ecr.us-east-1.amazonaws.com/inventory-app:latest",
+      "memory": 256,
+      "cpu": 128,
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5000,
+          "hostPort": 5000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "DB_HOST",
+          "value": "localhost"
+        },
+        {
+          "name": "DB_PORT",
+          "value": "5432"
+        },
+        {
+          "name": "DB_NAME",
+          "value": "inventory"
+        },
+        {
+          "name": "DB_USER",
+          "value": "postgres"
+        },
+        {
+          "name": "DB_PASSWORD",
+          "value": "postgres"
+        },
+        {
+          "name": "APP_ENV",
+          "value": "production"
+        }
+      ],
+      "dependsOn": [
+        {
+          "containerName": "inventory-db",
+          "condition": "START"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/inventory-task",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
