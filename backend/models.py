@@ -1,3 +1,4 @@
+# Inventory Management System - v2.0
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 
