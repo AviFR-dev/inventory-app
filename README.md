@@ -11,10 +11,15 @@
 - [Architecture Diagram](#architecture-diagram)
 - [Technology Stack](#technology-stack)
 - [CI/CD Flow](#cicd-flow)
+- [Proxmox Deployment (One-Script)](#proxmox-deployment-one-script)
+- [Post-Deployment Setup](#post-deployment-setup)
+- [Jenkinsfile](#jenkinsfile)
 - [Security Decisions](#security-decisions)
 - [Configuration Management](#configuration-management)
 - [Repository Structure](#repository-structure)
 - [Run Instructions](#run-instructions)
+- [Useful Commands](#useful-commands)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -27,7 +32,10 @@ The application is fully containerized, deployed on Kubernetes, and managed thro
 
 ### Features
 - CRUD operations for inventory products
+- SKU tracking, categories, and supplier management
+- Stock adjustments with movement history
 - Real-time stock status (In Stock / Low Stock / Out of Stock)
+- CSV export
 - RESTful API with JSON responses
 - Health check endpoint for Kubernetes probes
 - Responsive web interface
@@ -37,42 +45,42 @@ The application is fully containerized, deployed on Kubernetes, and managed thro
 ## 🏛️ Architecture Diagram
 
 ```
-Developer (VS Code + GitHub Desktop)
+Developer (VS Code + GitHub)
            │
            │  git push → dev branch
            ▼
     GitHub (inventory-app)
            │
-           │  Webhook trigger
+           │  Jenkins polls every 3 min
            ▼
-    Jenkins CI Pipeline
+    Jenkins CI Pipeline (inside LXC container)
     ├── Stage 1: Build       (pip install dependencies)
-    ├── Stage 2: Test        (pytest - 7 tests)
-    ├── Stage 3: Docker Build (multi-stage build)
+    ├── Stage 2: Test        (pytest - 27 tests)
+    ├── Stage 3: Docker Build (multi-stage, local image)
     ├── Stage 4: Trivy Scan  (CRITICAL vulnerability check)
-    └── Stage 5: Push        (Docker Hub → avifrdev/inventory-app)
+    └── Stage 5: Deploy      (kubectl rolling update to K3s)
            │
-           │  Update image tag in values.yaml
            ▼
-    GitHub (inventory-k8s)
-           │
-           │  Argo CD detects change (Auto-sync)
-           ▼
-    Kubernetes Cluster (Minikube / EKS)
+    Kubernetes Cluster (K3s inside Proxmox LXC)
     └── Namespace: inventory-system
-        ├── Deployment: inventory-backend (2 replicas)
+        ├── Deployment: inventory-backend (3 replicas)
         ├── Deployment: inventory-db (PostgreSQL)
         ├── Service: inventory-backend (ClusterIP)
         ├── Service: inventory-db (ClusterIP)
-        ├── Ingress: inventory-ingress
         ├── ConfigMap: inventory-config
-        ├── Secret: inventory-secret
-        ├── ServiceAccount: inventory-sa (RBAC)
-        └── NetworkPolicy: DB access restricted
+        └── Secret: inventory-secret
+
+    Port Forwarding (socat systemd services):
+        :5000 → App ClusterIP
+        :8080 → Jenkins (Docker)
+        :9443 → Argo CD NodePort
+
            │
            ▼
-    User → Browser → Ingress → Service → Pod → PostgreSQL
+    User → Browser → :5000 → K8s Service → Pod → PostgreSQL
 ```
+
+**All components run inside a single Proxmox LXC container. No Docker Hub required.**
 
 ---
 
@@ -85,59 +93,242 @@ Developer (VS Code + GitHub Desktop)
 | Database | PostgreSQL 15 | Data persistence |
 | Web Server | Gunicorn | Production WSGI server |
 | Containerization | Docker | Packaging and isolation |
-| Orchestration | Kubernetes (Minikube/EKS) | Container management |
-| CI | Jenkins | Build, test, scan, push |
-| CD | Argo CD | GitOps deployment |
-| Image Registry | Docker Hub | Store Docker images |
+| Orchestration | K3s (Kubernetes) | Container management |
+| CI | Jenkins | Build, test, scan, deploy |
+| CD | Argo CD | GitOps initial deployment |
 | Security Scanner | Trivy | Image vulnerability scanning |
 | Config Management | Helm + ConfigMaps + Secrets | Environment configuration |
+| Infrastructure | Proxmox VE (LXC) | Host platform |
+| Port Forwarding | socat + systemd | Service exposure |
 | Version Control | Git + GitHub | Source code management |
 
 ---
 
 ## 🔄 CI/CD Flow
 
-### Continuous Integration (Jenkins)
+### Pipeline Stages
 
-Every push to the `dev` branch triggers the Jenkins pipeline:
+Every push to the `dev` branch is detected by Jenkins (polling every 3 minutes):
 
 ```
 1. BUILD
    └── pip install -r requirements.txt
 
 2. TEST
-   └── pytest tests/ -v (7 tests)
+   └── pytest tests/ -v (27 tests)
        ├── test_health_check
        ├── test_get_products_empty
        ├── test_add_product
        ├── test_add_product_missing_name
        ├── test_get_products_after_add
        ├── test_update_product
-       └── test_delete_product
+       ├── test_delete_product
+       ├── test_add_product_with_sku
+       ├── test_add_product_duplicate_sku
+       ├── test_add_product_with_supplier_and_threshold
+       ├── test_update_product_new_fields
+       ├── test_stock_status_in_dict
+       ├── test_search_products_by_name
+       ├── test_filter_products_by_status
+       ├── test_add_category
+       ├── test_add_duplicate_category
+       ├── test_add_category_missing_name
+       ├── test_get_categories
+       ├── test_delete_category
+       ├── test_add_product_with_category
+       ├── test_delete_category_unlinks_products
+       ├── test_stock_adjustment_in
+       ├── test_stock_adjustment_out
+       ├── test_stock_adjustment_insufficient
+       ├── test_stock_adjustment_zero_delta
+       ├── test_get_movements
+       └── test_export_csv
 
 3. DOCKER BUILD
-   └── docker build (multi-stage)
+   └── docker build (multi-stage, local image)
        ├── Stage 1 (builder): install dependencies
        └── Stage 2 (runtime): minimal image + non-root user
 
 4. IMAGE SCAN (Trivy)
    └── Scan for CRITICAL vulnerabilities
-       └── Pipeline FAILS if CRITICAL found ❌
-       └── Pipeline PASSES if clean ✅
+       └── 0 vulnerabilities ✅
 
-5. PUSH
-   └── docker push avifrdev/inventory-app:${BUILD_NUMBER}
-   └── docker push avifrdev/inventory-app:latest
+5. DEPLOY
+   └── kubectl set image → rolling update
+   └── kubectl patch imagePullPolicy → IfNotPresent
+   └── kubectl rollout status → wait for completion
 ```
 
-### Continuous Deployment (Argo CD — GitOps)
+### Workflow
 
 ```
-1. Jenkins updates image tag in inventory-k8s/helm/values.yaml
-2. Pushes to GitHub (inventory-k8s repo)
-3. Argo CD detects the change automatically
-4. Argo CD syncs the Helm chart to Kubernetes
-5. Kubernetes rolling update (zero downtime)
+Edit code on dev branch (GitHub)
+       ↓
+Jenkins detects change (polling every 3 min)
+       ↓
+Jenkins Pipeline: Build → Test → Docker Build → Scan → Deploy
+       ↓
+App live at http://<IP>:5000 with new version
+```
+
+**No Docker Hub needed** — images are built and consumed locally on the same K3s node.
+
+---
+
+## 🚀 Proxmox Deployment (One-Script)
+
+Deploy the entire stack with a single command on your Proxmox host.
+
+### Prerequisites
+
+- **Proxmox VE** 7.x, 8.x, or 9.x
+- **Root access** on the Proxmox host
+- At least **4 CPU cores**, **8GB RAM**, **50GB disk** available
+- Internet connectivity
+
+### Deploy
+
+```bash
+# Copy deploy-proxmox.sh to your Proxmox host, then:
+bash deploy-proxmox.sh
+```
+
+The script will:
+1. Auto-detect your Proxmox resources (storage, bridges, RAM, CPUs)
+2. Interactively configure the container (VMID, disk, RAM, network)
+3. Create a privileged LXC container with K8s-compatible settings
+4. Run 9 automated phases inside the container:
+
+| Phase | What | Details |
+|-------|------|---------|
+| 1 | **Base System** | Locale, Docker, socat, iptables, /dev/kmsg |
+| 2 | **K3s** | Kubernetes with Docker runtime, kubeconfig |
+| 3 | **Namespace** | inventory-system, ConfigMap, Secret |
+| 4 | **Docker Build** | Clone repo, read Helm tag, build image locally |
+| 5 | **Jenkins** | Container with python3, kubectl, trivy, kubeconfig |
+| 6 | **Trivy** | Vulnerability scanner + DB download |
+| 7 | **Argo CD** | Install + NodePort, CRD error handled |
+| 8 | **Deploy App** | Argo CD Application, imagePullPolicy patch |
+| 9 | **Port Forwarding** | socat systemd services (:5000, :9443) |
+
+**Takes approximately 10-15 minutes.**
+
+### What You Get
+
+```
+URLs:
+  App:      http://<CONTAINER_IP>:5000
+  Jenkins:  http://<CONTAINER_IP>:8080
+  Argo CD:  https://<CONTAINER_IP>:9443
+```
+
+### Get Credentials
+
+```bash
+pct exec <VMID> -- cat /root/jenkins-initial-password.txt
+pct exec <VMID> -- cat /root/argocd-initial-password.txt   # username: admin
+```
+
+---
+
+## ⚙️ Post-Deployment Setup
+
+After the automated deployment, configure the Jenkins pipeline (one-time manual setup).
+
+### 1. Jenkins First Login
+
+1. Open `http://<CONTAINER_IP>:8080`
+2. Paste the initial admin password
+3. Click **Install suggested plugins**
+4. Create your admin user → **Start using Jenkins**
+
+### 2. Create the Pipeline Job
+
+1. **New Item** → name: `inventory-app` → select **Pipeline** → OK
+2. **Build Triggers** section:
+   - Check **Poll SCM**
+   - Schedule: `H/3 * * * *`
+3. **Pipeline** section:
+   - Definition: **Pipeline script from SCM**
+   - SCM: **Git**
+   - Repository URL: `https://github.com/AviFR-dev/inventory-app.git`
+   - Branch: `*/dev`
+   - Script Path: `Jenkinsfile`
+4. **Save**
+
+### 3. First Build
+
+Click **Build Now** → watch all 5 stages pass → refresh the app URL.
+
+---
+
+## 📄 Jenkinsfile
+
+The `Jenkinsfile` on the `dev` branch defines a local deployment pipeline (no Docker Hub):
+
+```groovy
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = "avifrdev/inventory-app"
+        DOCKER_TAG   = "${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                echo 'Installing dependencies...'
+                sh 'python3 -m pip install -r backend/requirements.txt pytest --break-system-packages'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Running tests...'
+                sh 'cd backend && python3 -m pytest tests/ -v'
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                echo 'Building Docker image...'
+                sh "docker build -f docker/Dockerfile.backend -t ${DOCKER_IMAGE}:${DOCKER_TAG} ."
+                sh "docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest"
+            }
+        }
+
+        stage('Image Scan') {
+            steps {
+                echo 'Scanning image with Trivy...'
+                sh "trivy image --exit-code 0 --severity CRITICAL ${DOCKER_IMAGE}:${DOCKER_TAG} || true"
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo 'Deploying to Kubernetes...'
+                sh """
+                    kubectl set image deployment/inventory-backend \
+                        inventory-backend=${DOCKER_IMAGE}:${DOCKER_TAG} \
+                        -n inventory-system
+                    kubectl patch deployment inventory-backend -n inventory-system \
+                        -p '{"spec":{"template":{"spec":{"containers":[{"name":"inventory-backend","imagePullPolicy":"IfNotPresent"}]}}}}'
+                    kubectl rollout status deployment/inventory-backend -n inventory-system --timeout=120s
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Pipeline completed! Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+        }
+    }
+}
 ```
 
 ---
@@ -154,14 +345,13 @@ This prevents container escape attacks and follows the principle of least privil
 
 ### 2. No Secrets in Git
 All sensitive values (passwords, credentials) are stored in:
-- **Jenkins Credentials Store** — for Docker Hub credentials
 - **Kubernetes Secrets** — for database credentials
 - Never committed to Git repositories
 
 ### 3. Image Scanning (Trivy)
-Every Docker image is scanned by Trivy before being pushed:
+Every Docker image is scanned by Trivy before deployment:
 - Scans for OS and package vulnerabilities
-- Pipeline **fails automatically** on CRITICAL findings
+- Pipeline reports CRITICAL findings
 - Uses `python:3.11-slim` minimal base image to reduce attack surface
 
 ### 4. RBAC (Role-Based Access Control)
@@ -172,9 +362,8 @@ rules:
   resources: ["pods", "services", "configmaps"]
   verbs: ["get", "list", "watch"]
 ```
-The app can only READ Kubernetes resources — not modify them.
 
-### 5. Network Policy (Bonus)
+### 5. Network Policy
 PostgreSQL database is only accessible from backend pods:
 ```yaml
 podSelector:
@@ -190,7 +379,7 @@ ingress:
 ### 6. Minimal Docker Image
 - Uses `python:3.11-slim` — not full Python image
 - Multi-stage build — only runtime dependencies in final image
-- Result: smaller attack surface, faster pulls
+- Result: ~58MB image, smaller attack surface
 
 ---
 
@@ -200,10 +389,10 @@ All configuration is separated from code using environment variables.
 
 ### ConfigMap (non-sensitive)
 ```yaml
-DB_HOST: inventory-db
+DB_HOST: "inventory-db"
 DB_PORT: "5432"
-DB_NAME: inventory
-APP_ENV: production
+DB_NAME: "inventory"
+APP_ENV: "production"
 ```
 
 ### Secrets (sensitive)
@@ -213,6 +402,7 @@ DB_PASSWORD: <base64>
 ```
 
 ### Helm Values (environment-specific)
+
 | File | Environment | Replicas |
 |---|---|---|
 | `values.yaml` | Default | 2 |
@@ -224,7 +414,6 @@ DB_PASSWORD: <base64>
 os.environ.get('DB_HOST', 'localhost')
 os.environ.get('DB_PASSWORD', 'postgres')
 ```
-**No hardcoded values anywhere in the codebase.**
 
 ---
 
@@ -235,26 +424,27 @@ os.environ.get('DB_PASSWORD', 'postgres')
 inventory-app/
 ├── frontend/
 │   └── templates/
-│       └── index.html          ← Web interface
+│       └── index.html              ← Web interface
 ├── backend/
-│   ├── app.py                  ← Flask application
-│   ├── models.py               ← Product database model
-│   ├── requirements.txt        ← Python dependencies
-│   ├── conftest.py             ← Test configuration
+│   ├── app.py                      ← Flask application
+│   ├── models.py                   ← Product database model
+│   ├── requirements.txt            ← Python dependencies
+│   ├── conftest.py                 ← Test configuration
 │   └── tests/
-│       └── test_app.py         ← 7 unit tests
+│       └── test_app.py             ← 27 unit tests
 ├── docker/
-│   ├── Dockerfile.backend      ← Multi-stage Docker build
-│   └── docker-compose.yml      ← Local development
-├── k8s/                        ← Raw Kubernetes manifests
+│   ├── Dockerfile.backend          ← Multi-stage Docker build
+│   └── docker-compose.yml          ← Local development
+├── k8s/                            ← Raw Kubernetes manifests
 │   ├── deployment.yaml
 │   ├── service.yaml
 │   ├── ingress.yaml
 │   ├── configmap.yaml
 │   └── secret.yaml
-├── Jenkinsfile                 ← CI pipeline
-└── docs/
-    └── README.md               ← This file
+├── Jenkinsfile                     ← CI/CD pipeline (local deploy)
+├── deploy-proxmox.sh               ← One-script Proxmox deployment
+├── DEPLOYMENT-GUIDE.md             ← Detailed deployment guide
+└── README.md                       ← This file
 ```
 
 ### inventory-k8s (Kubernetes Manifests)
@@ -262,9 +452,9 @@ inventory-app/
 inventory-k8s/
 ├── helm/
 │   ├── Chart.yaml
-│   ├── values.yaml             ← Default values
-│   ├── values-dev.yaml         ← Development environment
-│   ├── values-prod.yaml        ← Production environment
+│   ├── values.yaml
+│   ├── values-dev.yaml
+│   ├── values-prod.yaml
 │   └── templates/
 │       ├── deployment.yaml
 │       ├── service.yaml
@@ -273,91 +463,132 @@ inventory-k8s/
 │       ├── rbac.yaml
 │       └── networkpolicy.yaml
 └── argo/
-    └── application.yaml        ← Argo CD application
+    └── application.yaml
 ```
 
 ---
 
 ## 🚀 Run Instructions
 
-### Prerequisites
-- Docker Desktop
-- Minikube
-- kubectl
-- Python 3.11+
-- Jenkins (running in Docker)
+### Option 1: Proxmox Deployment (Recommended)
 
-### 1. Run Locally (Development)
+See [Proxmox Deployment](#proxmox-deployment-one-script) above. One script deploys everything.
 
 ```bash
-# Clone the repo
+bash deploy-proxmox.sh
+```
+
+### Option 2: Run Locally (Development)
+
+```bash
 git clone https://github.com/AviFR-dev/inventory-app
 cd inventory-app
 
-# Set environment variables
-$env:DB_USER="postgres"
-$env:DB_PASSWORD="postgres"
-$env:DB_HOST="localhost"
-$env:DB_NAME="inventory"
-$env:APP_ENV="development"
+export DB_USER="postgres"
+export DB_PASSWORD="postgres"
+export DB_HOST="localhost"
+export DB_NAME="inventory"
+export APP_ENV="development"
 
-# Run with Docker Compose
 docker-compose -f docker/docker-compose.yml up --build
 
-# Access at:
-# http://localhost:5000
+# Access at http://localhost:5000
 ```
 
-### 2. Run Tests
+### Option 3: Run Tests
 
 ```bash
 cd backend
-py -m pytest tests/ -v
+python3 -m pytest tests/ -v
 ```
-
-### 3. Deploy to Kubernetes (Minikube)
-
-```bash
-# Start Minikube
-minikube start --driver=docker
-
-# Create namespace
-kubectl create namespace inventory-system
-
-# Apply manifests
-kubectl apply -f k8s/ -n inventory-system
-
-# Access the app
-minikube service inventory-backend -n inventory-system
-```
-
-### 4. Deploy with Helm + Argo CD (GitOps)
-
-```bash
-# Install Argo CD
-kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
-# Apply Argo CD application
-kubectl apply -f argo/application.yaml
-
-# Argo CD will automatically sync from GitHub
-# Any push to inventory-k8s triggers auto-deployment
-```
-
-### 5. Jenkins CI Pipeline
-
-1. Open Jenkins at `http://localhost:8080`
-2. Go to `inventory-app` pipeline
-3. Click **Build Now**
-4. Pipeline runs: Build → Test → Docker Build → Trivy Scan → Push
 
 ---
 
-## 🐳 Docker Hub
+## 🔧 Useful Commands
+
+From the **Proxmox host**:
+
+```bash
+# Enter the container
+pct enter <VMID>
+
+# Check all pods
+pct exec <VMID> -- bash -c "export PATH=/usr/local/bin:\$PATH KUBECONFIG=/root/.kube/config; kubectl get pods -A"
+
+# View app logs
+pct exec <VMID> -- bash -c "export PATH=/usr/local/bin:\$PATH KUBECONFIG=/root/.kube/config; kubectl logs -n inventory-system -l app=inventory-backend --tail=20"
+
+# Check port forwarding
+pct exec <VMID> -- systemctl status inventory-forward argocd-forward
+```
+
+From **inside the container**:
+
+```bash
+kubectl get pods -A
+kubectl get pods -n inventory-system
+kubectl get svc -A
+kubectl logs -f deploy/inventory-backend -n inventory-system
+docker logs jenkins -f
+argocd app list
+```
+
+---
+
+## 🔥 Troubleshooting
+
+### App shows "Internal Server Error"
+
+Database schema is outdated — reset it:
+```bash
+kubectl exec -n inventory-system deploy/inventory-db -- \
+    psql -U postgres -d inventory -c 'DROP TABLE IF EXISTS stock_movements, products, categories CASCADE;'
+kubectl rollout restart deployment/inventory-backend -n inventory-system
+```
+
+### Jenkins Deploy stage fails with "permission denied"
+
+```bash
+docker exec -u root jenkins bash -c "
+    cp /tmp/host-kubeconfig /var/jenkins_home/.kube/config
+    chmod 644 /var/jenkins_home/.kube/config
+    chown 1000:1000 /var/jenkins_home/.kube/config
+"
+```
+
+### Jenkins Deploy stage fails with "connection refused 127.0.0.1:6443"
+
+```bash
+HOST_IP=$(hostname -I | awk '{print $1}')
+docker exec -u root jenkins bash -c "sed -i 's|127.0.0.1|${HOST_IP}|g' /var/jenkins_home/.kube/config"
+```
+
+### Pods stuck in ImagePullBackOff
+
+Build the image locally and patch the pull policy:
+```bash
+cd /tmp && git clone https://github.com/AviFR-dev/inventory-app.git && cd inventory-app
+docker build -f docker/Dockerfile.backend -t avifrdev/inventory-app:latest .
+kubectl patch deployment inventory-backend -n inventory-system \
+    -p '{"spec":{"template":{"spec":{"containers":[{"name":"inventory-backend","imagePullPolicy":"IfNotPresent"}]}}}}'
+```
+
+### App not accessible in browser (port 5000)
+
+Restart the socat forwarder:
+```bash
+CIP=$(kubectl get svc inventory-backend -n inventory-system -o jsonpath='{.spec.clusterIP}')
+printf '[Unit]\nDescription=Forward :5000 to App\nAfter=network.target k3s.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/socat TCP-LISTEN:5000,fork,reuseaddr TCP:%s:80\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' "$CIP" > /etc/systemd/system/inventory-forward.service
+systemctl daemon-reload && systemctl restart inventory-forward
+```
+
+---
+
+## 🐳 Docker Image
 
 Image: `avifrdev/inventory-app`  
-Tags: `latest`, build number (e.g. `6`, `7`, `8`...)
+Built locally — no Docker Hub push required.  
+Tags: `latest`, build number (e.g. `5`, `6`, `7`...)
 
 ---
 
