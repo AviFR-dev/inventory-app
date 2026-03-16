@@ -4,6 +4,7 @@ pipeline {
     environment {
         DOCKER_IMAGE = "avifrdev/inventory-app"
         DOCKER_TAG   = "${BUILD_NUMBER}"
+        K8S_REPO     = "https://github.com/AviFR-dev/inventory-k8s.git"
     }
 
     stages {
@@ -36,9 +37,37 @@ pipeline {
             }
         }
 
+        stage('Update K8s Repo') {
+            steps {
+                echo 'Updating Helm values with new image tag...'
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-credentials',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_TOKEN'
+                )]) {
+                    sh """
+                        rm -rf /tmp/inventory-k8s
+                        git clone https://\${GIT_USER}:\${GIT_TOKEN}@github.com/AviFR-dev/inventory-k8s.git /tmp/inventory-k8s
+                        cd /tmp/inventory-k8s
+                        git checkout main
+
+                        sed -i 's/tag: .*/tag: "${DOCKER_TAG}"/' helm/values.yaml
+
+                        git config user.email "jenkins@inventory.local"
+                        git config user.name "Jenkins CI"
+                        git add helm/values.yaml
+                        git commit -m "Auto-deploy: update image tag to ${DOCKER_TAG}"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/AviFR-dev/inventory-k8s.git main
+
+                        rm -rf /tmp/inventory-k8s
+                    """
+                }
+            }
+        }
+
         stage('Deploy') {
             steps {
-                echo 'Deploying to Kubernetes...'
+                echo 'Deploying via kubectl (immediate) + Argo CD will sync...'
                 sh """
                     kubectl set image deployment/inventory-backend \
                         inventory-backend=${DOCKER_IMAGE}:${DOCKER_TAG} \
@@ -53,7 +82,7 @@ pipeline {
 
     post {
         success {
-            echo "✅ Pipeline completed! Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            echo "✅ Pipeline completed! Image: ${DOCKER_IMAGE}:${DOCKER_TAG} — K8s repo updated"
         }
         failure {
             echo '❌ Pipeline failed!'
