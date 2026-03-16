@@ -1,7 +1,3 @@
-cd /opt/inventory-app
-git checkout dev || git checkout -b dev
-
-cat > Jenkinsfile << 'JEOF'
 pipeline {
     agent any
 
@@ -64,7 +60,3 @@ pipeline {
         }
     }
 }
-JEOF
-
-git add Jenkinsfile
-git commit -m "Fix Jenkinsfile: local deploy, no Docker Hub"
