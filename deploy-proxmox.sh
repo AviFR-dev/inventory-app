@@ -491,7 +491,8 @@ if [[ "$INSTALL_JENKINS" == "true" ]]; then
 
     ld=""; ld=$(which docker)
     jv=(-v jenkins_home:/var/jenkins_home -v /var/run/docker.sock:/var/run/docker.sock -v "${ld}:/usr/bin/docker")
-    [[ "$INSTALL_K3S" == "true" && -f /root/.kube/config ]] && jv+=(-v /root/.kube/config:/var/jenkins_home/.kube/config:ro)
+    # Mount kubeconfig to /tmp (read-only) — we'll copy it inside with correct permissions
+    [[ "$INSTALL_K3S" == "true" && -f /root/.kube/config ]] && jv+=(-v /root/.kube/config:/tmp/host-kubeconfig:ro)
 
     docker run -d --name jenkins --restart=unless-stopped --network jenkins \
         -p 8080:8080 -p 50000:50000 "${jv[@]}" jenkins/jenkins:lts
@@ -506,13 +507,51 @@ if [[ "$INSTALL_JENKINS" == "true" ]]; then
         sleep 5; ((r--))
     done
 
-    docker exec -u root jenkins bash -c "groupadd -f docker; usermod -aG docker jenkins; chmod 666 /var/run/docker.sock" 2>/dev/null || true
+    # Get the host IP (Jenkins container needs this instead of 127.0.0.1)
+    HOST_IP=$(hostname -I | awk '{print $1}')
+
+    info "Configuring Jenkins (docker, kubeconfig, python3, kubectl, trivy)..."
+    docker exec -u root jenkins bash -c "
+        # Docker socket permissions
+        groupadd -f docker 2>/dev/null
+        usermod -aG docker jenkins 2>/dev/null
+        chmod 666 /var/run/docker.sock 2>/dev/null
+
+        # Copy kubeconfig and fix permissions + server IP
+        if [[ -f /tmp/host-kubeconfig ]]; then
+            mkdir -p /var/jenkins_home/.kube
+            cp /tmp/host-kubeconfig /var/jenkins_home/.kube/config
+            sed -i 's|127.0.0.1|${HOST_IP}|g' /var/jenkins_home/.kube/config
+            chmod 644 /var/jenkins_home/.kube/config
+            chown 1000:1000 /var/jenkins_home/.kube/config
+        fi
+
+        # Install python3, kubectl, trivy
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq python3 python3-pip python3-venv wget gnupg
+
+        # kubectl
+        curl -sLO https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl
+        chmod +x kubectl && mv kubectl /usr/local/bin/
+
+        # trivy
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+        echo 'deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main' > /etc/apt/sources.list.d/trivy.list
+        apt-get update -qq && apt-get install -y -qq trivy
+    " 2>/dev/null || warn "Some Jenkins setup had warnings"
+
     docker restart jenkins 2>/dev/null || true; sleep 10
     JENKINS_PASS=$(docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword 2>/dev/null || echo "$JENKINS_PASS")
     echo "$JENKINS_PASS" > /root/jenkins-initial-password.txt
 
+    # Verify Jenkins can reach K3s
+    if [[ "$INSTALL_K3S" == "true" ]]; then
+        docker exec jenkins bash -c "kubectl get nodes 2>/dev/null" && success "Jenkins can reach K3s" || warn "Jenkins kubectl not verified yet"
+    fi
+
     success "Jenkins on :8080 — password: $JENKINS_PASS"
-    SUMMARY+=("Jenkins: port 8080")
+    SUMMARY+=("Jenkins: port 8080 (python3, kubectl, trivy installed)")
 fi
 
 ###########################################################################
